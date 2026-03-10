@@ -13,7 +13,7 @@ from .agent_interface import (
 )
 from .agent_manager import AgentManager
 from .trading import OrderBook, Order, OrderType, Trade, TradingRules
-from .market import StockMarket, MarketPhase, MarketEvent
+from .market import AShareMarket, MarketPhase, MarketEvent
 
 
 class TradingSession(Enum):
@@ -41,7 +41,7 @@ class ScalableExchange:
         verbose: bool = True
     ):
         self.agent_manager = agent_manager
-        self.market = StockMarket(initial_price, seed)
+        self.market = AShareMarket(initial_price, seed)
         self.order_book = OrderBook()
         
         self.current_hour = 9

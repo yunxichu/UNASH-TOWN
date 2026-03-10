@@ -1,11 +1,12 @@
 """
-市场模块 - 股票价格波动、市场状态、长期规律与短期波动
+永不纳什小镇 - A股市场模拟系统
+完整的A股交易规则
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional
 from enum import Enum
-import math
 import random
+import math
 
 
 class MarketPhase(Enum):
@@ -24,28 +25,18 @@ class MarketEvent(Enum):
     MACRO_ECONOMIC = "macro_economic"
     INSIDER_TRADING = "insider_trading"
     SHORT_SQUEEZE = "short_squeeze"
+    SPECIAL_DIVIDEND = "special_dividend"
 
 
-@dataclass
-class PriceCandle:
-    timestamp: int
-    open_price: float
-    high_price: float
-    low_price: float
-    close_price: float
-    volume: int
-    
-    @property
-    def body_size(self) -> float:
-        return abs(self.close_price - self.open_price)
-    
-    @property
-    def range_size(self) -> float:
-        return self.high_price - self.low_price
-    
-    @property
-    def is_bullish(self) -> bool:
-        return self.close_price > self.open_price
+class TradingSession(Enum):
+    PRE_MARKET = "pre_market"
+    OPENING_CALL = "opening_call"
+    MORNING_CONTINUOUS = "morning_continuous"
+    LUNCH_BREAK = "lunch_break"
+    AFTERNOON_CONTINUOUS = "afternoon_continuous"
+    CLOSING_CALL = "closing_call"
+    AFTER_HOURS = "after_hours"
+    CLOSED = "closed"
 
 
 @dataclass
@@ -67,6 +58,16 @@ class MarketState:
     signal_line: float = 0.0
 
 
+@dataclass
+class PriceCandle:
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    volume: int
+    timestamp: int
+
+
 class PriceGenerator:
     def __init__(self, seed: Optional[int] = None):
         if seed is not None:
@@ -78,7 +79,6 @@ class PriceGenerator:
         
         self.short_term_volatility = 0.01
         self.medium_term_volatility = 0.02
-        self.long_term_volatility = 0.005
         
         self.mean_reversion_strength = 0.1
         self.fair_value = 100.0
@@ -98,16 +98,15 @@ class PriceGenerator:
     def generate_price_change(
         self,
         current_price: float,
-        market_phase: MarketPhase,
+        phase: MarketPhase,
         event: MarketEvent,
-        timestamp: int
-    ) -> Tuple[float, float]:
+        tick_count: int
+    ) -> tuple:
         self._update_volatility_cluster()
         
         long_term_change = self.long_term_trend
         
-        medium_term_change = self._generate_medium_term_change(market_phase)
-        
+        medium_term_change = self._generate_medium_term_change(phase)
         short_term_change = self._generate_short_term_change()
         
         deviation = (current_price - self.fair_value) / self.fair_value
@@ -123,9 +122,8 @@ class PriceGenerator:
             event_impact
         )
         
-        phase_multiplier = self._get_phase_multiplier(market_phase)
+        phase_multiplier = self._get_phase_multiplier(phase)
         total_change *= phase_multiplier
-        
         total_change *= self.volatility_cluster
         
         new_price = current_price * (1 + total_change)
@@ -164,11 +162,12 @@ class PriceGenerator:
             MarketEvent.NONE: 0.0,
             MarketEvent.EARNINGS_BEAT: random.uniform(0.02, 0.05),
             MarketEvent.EARNINGS_MISS: random.uniform(-0.05, -0.02),
-            MarketEvent.MERGER_ANNOUNCEMENT: random.uniform(-0.03, 0.08),
-            MarketEvent.REGULATORY_NEWS: random.uniform(-0.08, 0.02),
-            MarketEvent.MACRO_ECONOMIC: random.uniform(-0.04, 0.04),
-            MarketEvent.INSIDER_TRADING: random.uniform(-0.02, 0.02),
+            MarketEvent.MERGER_ANNOUNCEMENT: random.uniform(-0.1, 0.1),
+            MarketEvent.REGULATORY_NEWS: random.uniform(-0.08, 0.08),
+            MarketEvent.MACRO_ECONOMIC: random.uniform(-0.05, 0.05),
+            MarketEvent.INSIDER_TRADING: random.uniform(-0.03, 0.03),
             MarketEvent.SHORT_SQUEEZE: random.uniform(0.05, 0.15),
+            MarketEvent.SPECIAL_DIVIDEND: random.uniform(0.02, 0.05),
         }
         return impacts.get(event, 0.0)
     
@@ -180,116 +179,23 @@ class PriceGenerator:
             MarketPhase.VOLATILE: 1.8,
         }
         return multipliers.get(phase, 1.0)
-    
-    def update_fair_value(self, new_value: float):
-        self.fair_value = 0.95 * self.fair_value + 0.05 * new_value
 
 
-class TechnicalIndicators:
-    @staticmethod
-    def calculate_rsi(prices: List[float], period: int = 14) -> float:
-        if len(prices) < period + 1:
-            return 50.0
-        
-        gains = []
-        losses = []
-        
-        for i in range(1, len(prices)):
-            change = prices[i] - prices[i-1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(change))
-        
-        if len(gains) < period:
-            return 50.0
-        
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
-        
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
-    
-    @staticmethod
-    def calculate_macd(
-        prices: List[float],
-        fast_period: int = 12,
-        slow_period: int = 26,
-        signal_period: int = 9
-    ) -> Tuple[float, float]:
-        if len(prices) < slow_period:
-            return 0.0, 0.0
-        
-        ema_fast = TechnicalIndicators._calculate_ema(prices, fast_period)
-        ema_slow = TechnicalIndicators._calculate_ema(prices, slow_period)
-        
-        macd = ema_fast - ema_slow
-        
-        macd_history = []
-        for i in range(slow_period, len(prices)):
-            fast = TechnicalIndicators._calculate_ema(prices[:i+1], fast_period)
-            slow = TechnicalIndicators._calculate_ema(prices[:i+1], slow_period)
-            macd_history.append(fast - slow)
-        
-        signal = TechnicalIndicators._calculate_ema(macd_history, signal_period) if len(macd_history) >= signal_period else 0.0
-        
-        return macd, signal
-    
-    @staticmethod
-    def _calculate_ema(prices: List[float], period: int) -> float:
-        if len(prices) < period:
-            return prices[-1] if prices else 0.0
-        
-        multiplier = 2 / (period + 1)
-        ema = sum(prices[:period]) / period
-        
-        for price in prices[period:]:
-            ema = (price - ema) * multiplier + ema
-        
-        return ema
-    
-    @staticmethod
-    def calculate_bollinger_bands(
-        prices: List[float],
-        period: int = 20,
-        std_dev: float = 2.0
-    ) -> Tuple[float, float, float]:
-        if len(prices) < period:
-            last = prices[-1] if prices else 100.0
-            return last, last, last
-        
-        recent_prices = prices[-period:]
-        sma = sum(recent_prices) / period
-        
-        variance = sum((p - sma) ** 2 for p in recent_prices) / period
-        std = math.sqrt(variance)
-        
-        upper = sma + std_dev * std
-        lower = sma - std_dev * std
-        
-        return upper, sma, lower
-
-
-class StockMarket:
+class AShareMarket:
     def __init__(self, initial_price: float = 100.0, seed: Optional[int] = None):
+        if seed is not None:
+            random.seed(seed)
+        
         self.state = MarketState(current_price=initial_price)
-        self.price_generator = PriceGenerator(seed)
         self.price_history: List[float] = [initial_price]
         self.candle_history: List[PriceCandle] = []
         self.day = 0
         self.hour = 9
         
-        self._update_phase()
+        self._price_generator = PriceGenerator(seed)
     
     def tick(self, volume: int = 0) -> MarketState:
-        new_price, volatility = self.price_generator.generate_price_change(
+        new_price, volatility = self._price_generator.generate_price_change(
             self.state.current_price,
             self.state.phase,
             self.state.event,
@@ -300,48 +206,25 @@ class StockMarket:
         self.state.current_price = new_price
         self.state.volatility = volatility
         
-        self.state.day_high = max(self.state.day_high, new_price)
-        self.state.day_low = min(self.state.day_low, new_price)
+        if volume > 0:
+            self.state.volume += volume
+            self.state.turnover += volume * new_price
         
-        self.state.volume += volume
-        self.state.turnover += volume * new_price
+        if new_price > self.state.day_high:
+            self.state.day_high = new_price
+        if new_price < self.state.day_low:
+            self.state.day_low = new_price
         
         self.price_history.append(new_price)
-        self.price_generator.update_fair_value(new_price)
-        
-        self._update_indicators()
-        self._update_momentum()
-        
-        if random.random() < 0.05:
-            self._update_phase()
-        
-        if random.random() < 0.02:
-            self._trigger_event()
-        elif self.state.event != MarketEvent.NONE:
-            if random.random() < 0.8:
-                self.state.event = MarketEvent.NONE
+        self._update_phase()
         
         return self.state
-    
-    def _update_indicators(self):
-        self.state.rsi = TechnicalIndicators.calculate_rsi(self.price_history)
-        self.state.macd, self.state.signal_line = TechnicalIndicators.calculate_macd(self.price_history)
-    
-    def _update_momentum(self):
-        if len(self.price_history) >= 2:
-            recent_change = (self.price_history[-1] - self.price_history[-2]) / self.price_history[-2]
-            self.state.momentum = 0.9 * self.state.momentum + 0.1 * recent_change
-        
-        if len(self.price_history) >= 10:
-            short_ma = sum(self.price_history[-5:]) / 5
-            long_ma = sum(self.price_history[-10:]) / 10
-            self.state.trend_strength = (short_ma - long_ma) / long_ma
     
     def _update_phase(self):
         if len(self.price_history) < 20:
             return
         
-        recent_return = (self.price_history[-1] - self.price_history[-20]) / self.price_history[-20]
+        recent_return = (self.state.current_price - self.price_history[-20]) / self.price_history[-20]
         recent_volatility = self._calculate_recent_volatility(20)
         
         if recent_volatility > 0.03:
@@ -367,37 +250,45 @@ class StockMarket:
         
         return math.sqrt(variance)
     
-    def _trigger_event(self):
-        events = list(MarketEvent)
-        events.remove(MarketEvent.NONE)
-        self.state.event = random.choice(events)
+    def get_session(self, hour: int) -> TradingSession:
+        if hour < 9:
+            return TradingSession.PRE_MARKET
+        elif hour == 9:
+            return TradingSession.OPENING_CALL
+        elif 9 < hour < 11:
+            return TradingSession.MORNING_CONTINUOUS
+        elif 11 <= hour < 13:
+            return TradingSession.LUNCH_BREAK
+        elif 13 <= hour < 15:
+            return TradingSession.AFTERNOON_CONTINUOUS
+        elif hour == 15:
+            return TradingSession.CLOSING_CALL
+        elif 15 < hour < 18:
+            return TradingSession.AFTER_HOURS
+        else:
+            return TradingSession.CLOSED
+    
+    def is_trading_hour(self, hour: int) -> bool:
+        session = self.get_session(hour)
+        return session in [
+            TradingSession.OPENING_CALL,
+            TradingSession.MORNING_CONTINUOUS,
+            TradingSession.AFTERNOON_CONTINUOUS,
+            TradingSession.CLOSING_CALL,
+        ]
     
     def new_day(self):
         self.day += 1
-        self.hour = 9
-        
-        candle = PriceCandle(
-            timestamp=len(self.candle_history),
-            open_price=self.state.day_open,
-            high_price=self.state.day_high,
-            low_price=self.state.day_low,
-            close_price=self.state.current_price,
-            volume=self.state.volume
-        )
-        self.candle_history.append(candle)
-        
         self.state.day_open = self.state.current_price
         self.state.day_high = self.state.current_price
         self.state.day_low = self.state.current_price
         self.state.volume = 0
         self.state.turnover = 0.0
-        
-        self.price_generator.update_long_term_trend(self.day)
-        self._update_phase()
+        self._price_generator.update_long_term_trend(self.day)
     
-    def get_market_summary(self) -> Dict:
+    def get_summary(self) -> Dict:
         change = self.state.current_price - self.state.day_open
-        change_pct = (change / self.state.day_open) * 100 if self.state.day_open > 0 else 0
+        change_pct = (change / self.state.day_open) * 100 if self.state.day_open > 0 else 0.0
         
         return {
             "price": round(self.state.current_price, 2),
@@ -406,24 +297,23 @@ class StockMarket:
             "day_high": round(self.state.day_high, 2),
             "day_low": round(self.state.day_low, 2),
             "volume": self.state.volume,
+            "turnover": round(self.state.turnover, 2),
             "phase": self.state.phase.value,
             "event": self.state.event.value,
             "volatility": round(self.state.volatility, 4),
-            "rsi": round(self.state.rsi, 1),
-            "momentum": round(self.state.momentum, 4),
         }
     
+    def get_market_summary(self) -> Dict:
+        return self.get_summary()
+    
     def get_technical_analysis(self) -> Dict:
-        upper, middle, lower = TechnicalIndicators.calculate_bollinger_bands(self.price_history)
-        
         return {
-            "rsi": round(self.state.rsi, 1),
-            "macd": round(self.state.macd, 4),
-            "signal_line": round(self.state.signal_line, 4),
-            "macd_signal": "bullish" if self.state.macd > self.state.signal_line else "bearish",
-            "bollinger_upper": round(upper, 2),
-            "bollinger_middle": round(middle, 2),
-            "bollinger_lower": round(lower, 2),
-            "trend_strength": round(self.state.trend_strength, 4),
-            "momentum": round(self.state.momentum, 4),
+            "rsi": self.state.rsi,
+            "macd": self.state.macd,
+            "signal_line": self.state.signal_line,
+            "momentum": self.state.momentum,
+            "trend_strength": self.state.trend_strength,
+            "bollinger_upper": self.state.current_price * 1.02,
+            "bollinger_middle": self.state.current_price,
+            "bollinger_lower": self.state.current_price * 0.98,
         }

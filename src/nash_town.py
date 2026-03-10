@@ -1,33 +1,37 @@
 """
-永不纳什小镇 - 完整模拟系统
-包含睡眠、社交、交易的综合小镇生活
+永不纳什小镇 - 简化版模拟系统
+核心：A股交易规则，智能体自主决策
 """
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import random
 
 from .town_agent import TownAgent, create_town_agents
-from .life_system import SocialEngine, ActivityType, MoodType
 from .trading import OrderBook, Order, OrderType, Trade, TradingRules
-from .market import StockMarket
+from .market import AShareMarket, MarketPhase
 
 
 @dataclass
 class TownStats:
-    total_conversations: int = 0
-    total_friendships: int = 0
     total_trades: int = 0
+    total_volume: int = 0
 
 
 class NashTown:
     HOURS_PER_DAY = 24
     
-    TRADING_MORNING_START = 9
-    TRADING_MORNING_END = 11
-    LUNCH_BREAK_START = 11
-    LUNCH_BREAK_END = 13
-    TRADING_AFTERNOON_START = 13
-    TRADING_AFTERNOON_END = 15
+    PRICE_LIMIT = 0.10
+    
+    CALL_AUCTION_OPEN = (9, 15)
+    CALL_AUCTION_CLOSE = (9, 25)
+    MORNING_TRADING_START = (9, 30)
+    MORNING_TRADING_END = (11, 30)
+    LUNCH_BREAK_START = (11, 30)
+    LUNCH_BREAK_END = (13, 0)
+    AFTERNOON_TRADING_START = (13, 0)
+    AFTERNOON_TRADING_END = (15, 0)
+    CALL_AUCTION_CLOSE_START = (14, 57)
+    MARKET_CLOSE = (15, 0)
     
     def __init__(
         self,
@@ -41,277 +45,395 @@ class NashTown:
             random.seed(seed)
         
         self.agents = create_town_agents(num_agents, initial_capital)
-        self.market = StockMarket(initial_price, seed)
+        self.market = AShareMarket(initial_price, seed)
         self.order_book = OrderBook()
-        self.social_engine = SocialEngine()
         
-        self.current_hour = 0
+        self.current_hour = 9
+        self.current_minute = 30
         self.current_day = 1
-        self.total_hours_simulated = 0
         
         self.verbose = verbose
         self.stats = TownStats()
         
         self.daily_logs: List[Dict] = []
-    
-    def get_time_phase(self, hour: int) -> str:
-        phases = {
-            (0, 6): "深夜",
-            (6, 9): "早晨",
-            (9, 12): "上午",
-            (12, 14): "中午",
-            (14, 18): "下午",
-            (18, 22): "傍晚",
-            (22, 24): "夜晚",
-        }
-        for (start, end), phase in phases.items():
-            if start <= hour < end:
-                return phase
-        return "深夜"
-    
-    def is_trading_hour(self, hour: int) -> bool:
-        morning_session = self.TRADING_MORNING_START <= hour < self.TRADING_MORNING_END
-        afternoon_session = self.TRADING_AFTERNOON_START <= hour < self.TRADING_AFTERNOON_END
-        return morning_session or afternoon_session
-    
-    def is_lunch_break(self, hour: int) -> bool:
-        return self.LUNCH_BREAK_START <= hour < self.LUNCH_BREAK_END
-    
-    def simulate_hour(self) -> Dict:
-        phase = self.get_time_phase(self.current_hour)
-        is_trading = self.is_trading_hour(self.current_hour)
-        is_lunch = self.is_lunch_break(self.current_hour)
+        self.trade_log: List[Dict] = []
         
-        hour_result = {
+        self._tick_count = 0
+        self._max_ticks_per_day = 6 * 60 + 30
+        
+        self._limit_up = initial_price * (1 + self.PRICE_LIMIT)
+        self._limit_down = initial_price * (1 - self.PRICE_LIMIT)
+    
+    def _time_to_minutes(self, hour: int, minute: int) -> int:
+        return hour * 60 + minute
+    
+    def get_market_phase(self) -> str:
+        current = self._time_to_minutes(self.current_hour, self.current_minute)
+        
+        call_open = self._time_to_minutes(*self.CALL_AUCTION_OPEN)
+        call_close = self._time_to_minutes(*self.CALL_AUCTION_CLOSE)
+        morning_start = self._time_to_minutes(*self.MORNING_TRADING_START)
+        morning_end = self._time_to_minutes(*self.MORNING_TRADING_END)
+        lunch_start = self._time_to_minutes(*self.LUNCH_BREAK_START)
+        lunch_end = self._time_to_minutes(*self.LUNCH_BREAK_END)
+        afternoon_start = self._time_to_minutes(*self.AFTERNOON_TRADING_START)
+        afternoon_end = self._time_to_minutes(*self.AFTERNOON_TRADING_END)
+        close_start = self._time_to_minutes(*self.CALL_AUCTION_CLOSE_START)
+        market_close = self._time_to_minutes(*self.MARKET_CLOSE)
+        
+        if current < call_open:
+            return "pre_market"
+        elif call_open <= current < call_close:
+            return "call_auction_open"
+        elif call_close <= current < morning_start:
+            return "call_auction_match"
+        elif morning_start <= current < morning_end:
+            return "morning_continuous"
+        elif lunch_start <= current < lunch_end:
+            return "lunch_break"
+        elif afternoon_start <= current < close_start:
+            return "afternoon_continuous"
+        elif close_start <= current < afternoon_end:
+            return "call_auction_close"
+        elif afternoon_end <= current < market_close:
+            return "closing"
+        else:
+            return "closed"
+    
+    def is_trading_time(self) -> bool:
+        phase = self.get_market_phase()
+        return phase in ["call_auction_open", "call_auction_match", 
+                        "morning_continuous", "afternoon_continuous",
+                        "call_auction_close"]
+    
+    def is_lunch_break(self) -> bool:
+        return self.get_market_phase() == "lunch_break"
+    
+    def simulate_tick(self) -> Dict:
+        self._tick_count += 1
+        
+        if self._tick_count > self._max_ticks_per_day:
+            return {"error": "max_ticks_exceeded"}
+        
+        phase = self.get_market_phase()
+        
+        tick_result = {
             "day": self.current_day,
-            "hour": self.current_hour,
+            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
             "phase": phase,
-            "is_trading_hour": is_trading,
-            "is_lunch_break": is_lunch,
-            "sleeping": [],
-            "socializing": [],
-            "trading": [],
+            "trades": [],
+            "price": self.market.state.current_price,
         }
-        
-        if self.verbose:
-            if is_lunch:
-                print(f"\n--- 第{self.current_day}天 {self.current_hour:02d}:00 (午间休市) ---")
-            else:
-                print(f"\n--- 第{self.current_day}天 {self.current_hour:02d}:00 ({phase}) ---")
         
         for agent in self.agents:
             agent.update_hour(self.current_hour)
-            
-            if agent.is_sleeping():
-                hour_result["sleeping"].append(agent.name)
-            elif self.current_hour == agent.wake_time:
-                if self.verbose:
-                    status = agent.get_status()
-                    print(f"  ⏰ {agent.name} 醒来了 (精力:{status['energy']:.0f})")
+        
+        if self.is_trading_time():
+            trades = self._run_trading_tick(phase)
+            tick_result["trades"] = trades
+            tick_result["price"] = self.market.state.current_price
+        
+        self._advance_time()
+        
+        if self.current_hour == 15 and self.current_minute == 0:
+            self._end_day()
+            tick_result["day_ended"] = True
+        
+        return tick_result
+    
+    def _run_trading_tick(self, phase: str) -> List[Dict]:
+        timestamp = self._time_to_minutes(self.current_hour, self.current_minute)
+        trades_executed = []
         
         awake_agents = [a for a in self.agents if not a.is_sleeping()]
         
         for agent in awake_agents:
-            if agent.energy.current_energy < 20:
-                agent.rest()
+            if not agent.can_trade():
                 continue
             
-            if is_trading and random.random() < 0.3:
-                agent._current_activity = ActivityType.TRADING
-                agent.go_to("交易所")
-                hour_result["trading"].append(agent.name)
+            trade_prob = 0.1 if "call_auction" in phase else 0.05
             
-            elif is_lunch and random.random() < 0.4:
-                location = random.choice(["茶馆", "餐厅", "休息室"])
-                agent.go_to(location)
-                agent.rest()
-                if self.verbose and random.random() < 0.3:
-                    print(f"  🍜 {agent.name} 在{location}休息用餐")
-            
-            elif random.random() < 0.2:
-                other_agents = [a for a in awake_agents 
-                              if a.agent_id != agent.agent_id 
-                              and a.can_socialize()]
+            if random.random() < trade_prob:
+                decision = self._get_agent_decision(agent, timestamp)
                 
-                if other_agents:
-                    other = random.choice(other_agents)
-                    result = agent.socialize_with(other, self.social_engine)
-                    
-                    if result["success"]:
-                        location = random.choice(["广场", "茶馆", "公园"])
-                        agent.go_to(location)
-                        other.go_to(location)
-                        
-                        hour_result["socializing"].append(f"{agent.name} & {other.name}")
-                        self.stats.total_conversations += 1
-                        
-                        if self.verbose:
-                            print(f"  💬 {agent.name} 和 {other.name} 在{location}聊天")
-                            print(f"     \"{result['greeting']}\"")
+                if decision:
+                    order = self._create_order(agent, decision, timestamp)
+                    if order:
+                        valid, msg = TradingRules.validate_order(
+                            order.price,
+                            order.quantity,
+                            self.market.state.current_price,
+                            agent.capital,
+                            agent.position
+                        )
+                        if valid:
+                            self.order_book.add_order(order)
         
-        if is_trading:
-            trades = self._run_trading_session()
-            if trades and self.verbose:
-                print(f"  📈 交易: 成交 {len(trades)} 笔")
-        
-        self._advance_time()
-        self.total_hours_simulated += 1
-        
-        return hour_result
-    
-    def _run_trading_session(self) -> List:
-        timestamp = self.current_hour * 60
-        trades_executed = []
-        
-        for agent in self.agents:
-            if agent.is_sleeping() or not agent.can_trade():
-                continue
-            
-            if random.random() < 0.15:
-                from .agent_interface import TradingContext, MarketData, TechnicalIndicators
-                
-                market_summary = self.market.get_market_summary()
-                technical = self.market.get_technical_analysis()
-                
-                context = TradingContext(
-                    market_data=MarketData(
-                        price=market_summary["price"],
-                        volume=market_summary["volume"],
-                        timestamp=timestamp,
-                    ),
-                    technical=TechnicalIndicators(
-                        rsi=technical["rsi"],
-                        macd=technical["macd"],
-                        signal_line=technical["signal_line"],
-                    ),
-                    agent_state=agent.get_state(),
-                    order_book_depth=self.order_book.get_market_depth(),
-                    timestamp=timestamp,
-                )
-                
-                decision = agent.decide(context)
-                
-                if decision.action == "buy" and decision.price and decision.quantity:
-                    order = Order(
-                        order_id=0,
-                        agent_id=agent.agent_id,
-                        order_type=OrderType.BUY,
-                        price=decision.price,
-                        quantity=decision.quantity,
-                        timestamp=timestamp
-                    )
-                    self.order_book.add_order(order)
-                
-                elif decision.action == "sell" and decision.price and decision.quantity:
-                    order = Order(
-                        order_id=0,
-                        agent_id=agent.agent_id,
-                        order_type=OrderType.SELL,
-                        price=decision.price,
-                        quantity=decision.quantity,
-                        timestamp=timestamp
-                    )
-                    self.order_book.add_order(order)
-        
-        trades = self.order_book.match_orders(timestamp)
+        if phase == "call_auction_match":
+            trades = self.order_book.match_orders(timestamp)
+        elif phase in ["morning_continuous", "afternoon_continuous"]:
+            trades = self.order_book.match_orders(timestamp)
+        elif phase == "call_auction_close":
+            trades = self.order_book.match_orders(timestamp)
+        else:
+            trades = []
         
         for trade in trades:
-            buyer = next((a for a in self.agents if a.agent_id == trade.buyer_id), None)
-            seller = next((a for a in self.agents if a.agent_id == trade.seller_id), None)
-            
-            fee = TradingRules.calculate_fee(trade.price * trade.quantity)
-            
-            if buyer:
-                buyer.update_position(True, trade.quantity, trade.price, fee)
-            
-            if seller:
-                seller.update_position(False, trade.quantity, trade.price, fee)
-            
-            self.stats.total_trades += 1
-            trades_executed.append(trade)
+            self._execute_trade(trade)
+            trades_executed.append({
+                "buyer": trade.buyer_id,
+                "seller": trade.seller_id,
+                "price": trade.price,
+                "quantity": trade.quantity
+            })
         
-        self.market.tick(len(trades))
+        if trades:
+            self.market.tick(len(trades))
+        
         return trades_executed
     
+    def _get_agent_decision(self, agent: TownAgent, timestamp: int):
+        from .agent_interface import TradingContext, MarketData, TechnicalIndicators
+        
+        market_summary = self.market.get_market_summary()
+        technical = self.market.get_technical_analysis()
+        
+        context = TradingContext(
+            market_data=MarketData(
+                price=market_summary["price"],
+                volume=market_summary["volume"],
+                timestamp=timestamp,
+                bid=self.order_book.get_spread()[0],
+                ask=self.order_book.get_spread()[1],
+                high=market_summary["day_high"],
+                low=market_summary["day_low"],
+                open_price=self.market.state.day_open,
+                phase=market_summary["phase"],
+                event=market_summary["event"],
+            ),
+            technical=TechnicalIndicators(
+                rsi=technical["rsi"],
+                macd=technical["macd"],
+                signal_line=technical["signal_line"],
+            ),
+            agent_state=agent.get_state(),
+            order_book_depth=self.order_book.get_market_depth(),
+            timestamp=timestamp,
+        )
+        
+        return agent.decide(context)
+    
+    def _create_order(self, agent: TownAgent, decision, timestamp: int) -> Optional[Order]:
+        if decision.action == "none":
+            return None
+        
+        current_price = self.market.state.current_price
+        
+        if self._limit_up and current_price >= self._limit_up:
+            if decision.action == "buy":
+                return None
+        
+        if self._limit_down and current_price <= self._limit_down:
+            if decision.action == "sell":
+                return None
+        
+        if decision.action == "buy":
+            if decision.price is None or decision.quantity is None:
+                return None
+            
+            price = decision.price
+            
+            if self._limit_up:
+                price = min(price, self._limit_up)
+            if self._limit_down:
+                price = max(price, self._limit_down)
+            
+            quantity = decision.quantity
+            
+            max_qty = int(agent.capital / (price * (1 + TradingRules.TRADING_FEE_RATE)))
+            quantity = min(quantity, max_qty)
+            
+            if quantity <= 0:
+                return None
+            
+            return Order(
+                order_id=0,
+                agent_id=agent.agent_id,
+                order_type=OrderType.BUY,
+                price=price,
+                quantity=quantity,
+                timestamp=timestamp
+            )
+        
+        elif decision.action == "sell":
+            if agent.position <= 0:
+                return None
+            
+            price = decision.price or self.market.state.current_price
+            
+            if self._limit_up:
+                price = min(price, self._limit_up)
+            if self._limit_down:
+                price = max(price, self._limit_down)
+            
+            quantity = decision.quantity or agent.position
+            quantity = min(quantity, agent.position)
+            
+            if quantity <= 0:
+                return None
+            
+            return Order(
+                order_id=0,
+                agent_id=agent.agent_id,
+                order_type=OrderType.SELL,
+                price=price,
+                quantity=quantity,
+                timestamp=timestamp
+            )
+        
+        return None
+    
+    def _execute_trade(self, trade: Trade):
+        buyer = next((a for a in self.agents if a.agent_id == trade.buyer_id), None)
+        seller = next((a for a in self.agents if a.agent_id == trade.seller_id), None)
+        
+        fee = TradingRules.calculate_fee(trade.price * trade.quantity)
+        
+        if buyer:
+            buyer.update_position(True, trade.quantity, trade.price, fee)
+        
+        if seller:
+            seller.update_position(False, trade.quantity, trade.price, fee)
+        
+        self.stats.total_trades += 1
+        self.stats.total_volume += trade.quantity
+        
+        self.trade_log.append({
+            "day": self.current_day,
+            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
+            "buyer": trade.buyer_id,
+            "seller": trade.seller_id,
+            "price": trade.price,
+            "quantity": trade.quantity,
+        })
+    
     def _advance_time(self):
-        self.current_hour += 1
-        if self.current_hour >= self.HOURS_PER_DAY:
-            self.current_hour = 0
-            self.current_day += 1
+        self.current_minute += 1
+        if self.current_minute >= 60:
+            self.current_minute = 0
+            self.current_hour += 1
+            
+            if self.current_hour >= 24:
+                self.current_hour = 0
+    
+    def _end_day(self):
+        daily_log = {
+            "day": self.current_day,
+            "open": self.market.state.day_open,
+            "high": self.market.state.day_high,
+            "low": self.market.state.day_low,
+            "close": self.market.state.current_price,
+            "volume": self.stats.total_volume,
+            "trades": self.stats.total_trades,
+            "agents": [
+                {
+                    "name": a.name,
+                    "capital": a.capital,
+                    "position": a.position,
+                    "total_value": a.total_value,
+                }
+                for a in self.agents
+            ]
+        }
+        self.daily_logs.append(daily_log)
+        
+        if self.verbose:
+            self._print_day_summary()
+        
+        self.current_day += 1
+        self.market.new_day()
+        self.stats = TownStats()
+        self._tick_count = 0
+        
+        self._limit_up = self.market.state.day_open * (1 + self.PRICE_LIMIT)
+        self._limit_down = self.market.state.day_open * (1 - self.PRICE_LIMIT)
+        
+        self.current_hour = 9
+        self.current_minute = 30
+    
+    def _print_day_summary(self):
+        print(f"\n{'='*60}")
+        print(f"📊 第 {self.current_day} 天交易结束")
+        print(f"{'='*60}")
+        
+        summary = self.market.get_market_summary()
+        print(f"开盘: {summary.get('day_open', summary['price']):.2f} | "
+              f"收盘: {summary['price']:.2f} | "
+              f"涨跌: {summary['change_pct']:.2f}%")
+        print(f"最高: {summary['day_high']:.2f} | "
+              f"最低: {summary['day_low']:.2f} | "
+              f"成交量: {self.stats.total_volume}")
+        
+        sorted_agents = sorted(self.agents, key=lambda a: a.total_value, reverse=True)
+        print(f"\n🏆 财富榜 Top 5:")
+        for i, agent in enumerate(sorted_agents[:5], 1):
+            medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "  "))
+            print(f"  {medal} {agent.name}: {agent.total_value:,.0f}元")
     
     def simulate_day(self) -> Dict:
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"🏘️ 永不纳什小镇 - 第 {self.current_day} 天")
             print(f"{'='*60}")
-            
-            print(f"\n👥 居民:")
-            for agent in self.agents[:3]:
-                status = agent.get_status()
-                print(f"  {status['name']}: 睡眠 {agent.bedtime}:00-{agent.wake_time}:00")
+            print(f"智能体数量: {len(self.agents)}")
         
         start_day = self.current_day
-        hours_this_day = 0
+        ticks = 0
+        max_ticks = self._max_ticks_per_day + 100
         
-        while hours_this_day < self.HOURS_PER_DAY:
-            self.simulate_hour()
-            hours_this_day += 1
-        
-        self._record_daily_log()
-        
-        if self.verbose:
-            self._print_day_summary()
+        while ticks < max_ticks:
+            result = self.simulate_tick()
+            ticks += 1
+            
+            if result.get("day_ended"):
+                break
         
         return self.daily_logs[-1] if self.daily_logs else {}
     
-    def _record_daily_log(self):
-        total_friends = sum(len(a.social.friends) for a in self.agents) // 2
-        self.stats.total_friendships = total_friends
-        
-        daily_log = {
-            "day": self.current_day - 1,
-            "stats": {
-                "conversations": self.stats.total_conversations,
-                "friendships": self.stats.total_friendships,
-                "trades": self.stats.total_trades,
-            },
-            "agent_status": [a.get_status() for a in self.agents],
-            "market": self.market.get_market_summary(),
-        }
-        self.daily_logs.append(daily_log)
-        self.market.new_day()
-    
-    def _print_day_summary(self):
-        print(f"\n{'='*60}")
-        print(f"📊 第 {self.current_day - 1} 天结束")
-        print(f"{'='*60}")
-        print(f"  💬 对话: {self.stats.total_conversations} 次")
-        print(f"  🤝 友谊: {self.stats.total_friendships} 对")
-        print(f"  📈 交易: {self.stats.total_trades} 笔")
-        
-        sorted_agents = sorted(self.agents, key=lambda a: a.total_value, reverse=True)
-        print(f"\n🏆 财富榜:")
-        for i, agent in enumerate(sorted_agents[:3], 1):
-            status = agent.get_status()
-            medal = "🥇" if i == 1 else ("🥈" if i == 2 else "🥉")
-            print(f"  {medal} {status['name']}: {status['total_value']:,.0f}元 | 精力:{status['energy']:.0f}")
-    
     def simulate_days(self, num_days: int) -> List[Dict]:
         logs = []
-        for day in range(num_days):
+        for _ in range(num_days):
             day_log = self.simulate_day()
             logs.append(day_log)
         return logs
     
-    def get_town_overview(self) -> Dict:
+    def get_market_overview(self) -> Dict:
         return {
             "day": self.current_day,
-            "hour": self.current_hour,
-            "population": len(self.agents),
-            "sleeping": sum(1 for a in self.agents if a.is_sleeping()),
-            "stats": {
-                "conversations": self.stats.total_conversations,
-                "friendships": self.stats.total_friendships,
-                "trades": self.stats.total_trades,
-            }
+            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
+            "phase": self.get_market_phase(),
+            "price": self.market.state.current_price,
+            "market": self.market.get_market_summary(),
+            "agents": len(self.agents),
         }
+    
+    def get_available_actions(self, agent_id: str) -> List[str]:
+        agent = next((a for a in self.agents if a.agent_id == agent_id), None)
+        if not agent:
+            return []
+        
+        actions = []
+        
+        if agent.is_sleeping():
+            return ["sleep"]
+        
+        if self.is_trading_time():
+            if agent.can_trade():
+                actions.extend(["buy", "sell", "hold"])
+        
+        if self.is_lunch_break():
+            actions.extend(["rest", "socialize"])
+        
+        actions.append("wait")
+        
+        return actions
