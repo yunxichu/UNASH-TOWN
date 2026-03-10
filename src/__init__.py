@@ -1,12 +1,17 @@
 """
-UNASH-TOWN: 多智能体博弈小镇
-一个包含10个不同初始倾向智能体的博弈模拟系统
+UNASH-TOWN: 股市交易小镇
+多智能体股市交易模拟系统
 """
 
-from .agent import Agent, AgentTendency
-from .environment import Environment
-from .game import GameEngine
-from .town import Town
+from .trader import TraderAgent, TraderType, create_traders
+from .trading import Order, OrderBook, OrderType, TradingRules, MarketMaker
+from .market import StockMarket, MarketPhase, MarketEvent
+from .exchange import ExchangeTown, TradingSession
 
-__all__ = ['Agent', 'AgentTendency', 'Environment', 'GameEngine', 'Town']
-__version__ = '0.1.0'
+__all__ = [
+    'TraderAgent', 'TraderType', 'create_traders',
+    'Order', 'OrderBook', 'OrderType', 'TradingRules', 'MarketMaker',
+    'StockMarket', 'MarketPhase', 'MarketEvent',
+    'ExchangeTown', 'TradingSession'
+]
+__version__ = '1.0.0'

@@ -1,21 +1,22 @@
 """
-UNASH-TOWN: 多智能体博弈小镇
-主程序入口
+UNASH-TOWN: 股市交易小镇
+多智能体股市交易模拟系统 - 主程序入口
 """
 import argparse
 import json
 import random
 from datetime import datetime
 
-from src.agent import create_diverse_agents, AgentTendency
-from src.town import Town
-from src.game import GameEngine
+from src.exchange import ExchangeTown
+from src.trader import TraderType
 
 
 def main():
-    parser = argparse.ArgumentParser(description="UNASH-TOWN 多智能体博弈小镇模拟")
-    parser.add_argument("--agents", type=int, default=10, help="智能体数量")
+    parser = argparse.ArgumentParser(description="UNASH-TOWN 股市交易小镇模拟")
+    parser.add_argument("--traders", type=int, default=10, help="交易者数量")
     parser.add_argument("--days", type=int, default=3, help="模拟天数")
+    parser.add_argument("--capital", type=float, default=10000.0, help="初始资金")
+    parser.add_argument("--price", type=float, default=100.0, help="初始股价")
     parser.add_argument("--seed", type=int, default=None, help="随机种子")
     parser.add_argument("--quiet", action="store_true", help="静默模式")
     parser.add_argument("--output", type=str, default=None, help="输出文件路径")
@@ -23,27 +24,29 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("  UNASH-TOWN: 多智能体博弈小镇模拟系统")
+    print("  UNASH-TOWN: 股市交易小镇模拟系统")
     print("=" * 60)
     print(f"\n配置:")
-    print(f"  智能体数量: {args.agents}")
+    print(f"  交易者数量: {args.traders}")
     print(f"  模拟天数: {args.days}")
+    print(f"  初始资金: {args.capital:,.2f}")
+    print(f"  初始股价: {args.price:.2f}")
     print(f"  随机种子: {args.seed if args.seed else '随机'}")
     print()
     
-    town = Town(
-        num_agents=args.agents,
-        zero_sum_mode=True,
-        random_seed=args.seed,
+    town = ExchangeTown(
+        num_traders=args.traders,
+        initial_capital=args.capital,
+        initial_price=args.price,
+        seed=args.seed,
         verbose=not args.quiet
     )
     
-    print("\n初始智能体状态:")
-    print("-" * 50)
-    for agent in town.agents:
-        traits_str = ", ".join(f"{k}:{v:.2f}" for k, v in list(agent.traits.items())[:3])
-        print(f"  {agent.name}: {agent.tendency.value}")
-        print(f"    特征: {traits_str}...")
+    print("\n初始交易者状态:")
+    print("-" * 60)
+    for trader in town.traders:
+        print(f"  {trader.name}: {trader.trader_type.value}")
+        print(f"    资金: {trader.capital:,.2f} | 风险偏好: {trader.profile['risk_tolerance']:.1f}")
     
     print("\n开始模拟...")
     print("=" * 60)
@@ -54,38 +57,43 @@ def main():
     print("模拟结束!")
     print("=" * 60)
     
-    final_status = town.get_agent_status()
+    leaderboard = town.get_leaderboard()
     
-    print("\n最终排名:")
-    print("-" * 50)
-    for i, status in enumerate(final_status, 1):
+    print("\n最终排行榜:")
+    print("-" * 60)
+    for i, status in enumerate(leaderboard, 1):
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "  "))
-        print(f"  {medal} {i}. {status['name']} ({status['tendency']}): {status['resources']:.1f} 资源")
+        print(f"  {medal} {i}. {status['name']} ({status['type']}): "
+              f"总资产 {status['total_value']:,.2f} | 收益率 {status['return_rate']}")
     
-    stats = town.game_engine.get_statistics()
-    print("\n总体博弈统计:")
-    print("-" * 50)
-    print(f"  总博弈场次: {stats['total_games']}")
-    print(f"  平均收益: {stats['average_payoff']}")
-    print(f"  合作率: {stats['cooperation_rate']*100:.1f}%")
-    print(f"  背叛率: {stats['defection_rate']*100:.1f}%")
-    print(f"  妥协率: {stats['compromise_rate']*100:.1f}%")
+    market_overview = town.get_market_overview()
+    print("\n市场概况:")
+    print("-" * 60)
+    market = market_overview["market"]
+    print(f"  最终价格: {market['price']:.2f}")
+    print(f"  涨跌幅: {market['change_pct']:.2f}%")
+    print(f"  市场状态: {market['phase']}")
+    print(f"  总成交量: {market['volume']:,}")
     
     if args.output:
         output_data = {
             "config": {
-                "num_agents": args.agents,
+                "num_traders": args.traders,
                 "num_days": args.days,
+                "initial_capital": args.capital,
+                "initial_price": args.price,
                 "seed": args.seed,
             },
-            "final_status": final_status,
-            "game_statistics": stats,
-            "day_summaries": [
+            "final_leaderboard": leaderboard,
+            "market_summary": market,
+            "daily_logs": [
                 {
-                    "day": log.day,
-                    "games_played": len(log.game_results),
-                    "social_interactions": len(log.social_interactions),
-                    "final_resources": log.final_resources
+                    "day": log["day"],
+                    "open": log["open"],
+                    "high": log["high"],
+                    "low": log["low"],
+                    "close": log["close"],
+                    "volume": log["volume"],
                 }
                 for log in logs
             ]
