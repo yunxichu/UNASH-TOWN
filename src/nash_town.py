@@ -21,8 +21,13 @@ class TownStats:
 
 class NashTown:
     HOURS_PER_DAY = 24
-    TRADING_START = 9
-    TRADING_END = 15
+    
+    TRADING_MORNING_START = 9
+    TRADING_MORNING_END = 11
+    LUNCH_BREAK_START = 11
+    LUNCH_BREAK_END = 13
+    TRADING_AFTERNOON_START = 13
+    TRADING_AFTERNOON_END = 15
     
     def __init__(
         self,
@@ -65,24 +70,34 @@ class NashTown:
         return "深夜"
     
     def is_trading_hour(self, hour: int) -> bool:
-        return self.TRADING_START <= hour < self.TRADING_END
+        morning_session = self.TRADING_MORNING_START <= hour < self.TRADING_MORNING_END
+        afternoon_session = self.TRADING_AFTERNOON_START <= hour < self.TRADING_AFTERNOON_END
+        return morning_session or afternoon_session
+    
+    def is_lunch_break(self, hour: int) -> bool:
+        return self.LUNCH_BREAK_START <= hour < self.LUNCH_BREAK_END
     
     def simulate_hour(self) -> Dict:
         phase = self.get_time_phase(self.current_hour)
         is_trading = self.is_trading_hour(self.current_hour)
+        is_lunch = self.is_lunch_break(self.current_hour)
         
         hour_result = {
             "day": self.current_day,
             "hour": self.current_hour,
             "phase": phase,
             "is_trading_hour": is_trading,
+            "is_lunch_break": is_lunch,
             "sleeping": [],
             "socializing": [],
             "trading": [],
         }
         
         if self.verbose:
-            print(f"\n--- 第{self.current_day}天 {self.current_hour:02d}:00 ({phase}) ---")
+            if is_lunch:
+                print(f"\n--- 第{self.current_day}天 {self.current_hour:02d}:00 (午间休市) ---")
+            else:
+                print(f"\n--- 第{self.current_day}天 {self.current_hour:02d}:00 ({phase}) ---")
         
         for agent in self.agents:
             agent.update_hour(self.current_hour)
@@ -105,6 +120,13 @@ class NashTown:
                 agent._current_activity = ActivityType.TRADING
                 agent.go_to("交易所")
                 hour_result["trading"].append(agent.name)
+            
+            elif is_lunch and random.random() < 0.4:
+                location = random.choice(["茶馆", "餐厅", "休息室"])
+                agent.go_to(location)
+                agent.rest()
+                if self.verbose and random.random() < 0.3:
+                    print(f"  🍜 {agent.name} 在{location}休息用餐")
             
             elif random.random() < 0.2:
                 other_agents = [a for a in awake_agents 
