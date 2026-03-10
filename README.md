@@ -1,21 +1,25 @@
-# UNASH-TOWN 🏘️📈
+# UNASH-TOWN 🏘️📈🤖
 
-**多智能体股市交易小镇模拟系统**
+**可扩展多智能体股市交易系统**
 
-一个包含10种不同交易策略智能体的股市博弈模拟系统，具有完整的订单簿、做市机制、技术指标和价格波动模型。
+一个支持动态增减智能体、API接入的多智能体博弈模拟系统，具有完整的订单簿、做市机制、技术指标和价格波动模型。
 
 ## 🎮 项目简介
 
-UNASH-TOWN 是一个多智能体股市交易模拟系统，模拟了一个虚拟股票市场中10种不同交易策略的智能体之间的博弈。系统包含完整的交易机制、价格发现过程和技术分析工具。
+UNASH-TOWN 是一个可扩展的多智能体股市交易模拟系统，支持：
+- **动态智能体管理**: 运行时动态注册/注销智能体
+- **API接入**: 外部智能体通过HTTP API接入
+- **多种智能体类型**: 本地智能体、远程智能体、回调智能体
+- **完整交易机制**: 订单簿、撮合引擎、做市商
 
 ### 核心特性
 
-- **10种交易策略智能体**: 价值投资、动量交易、均值回归、做市商、噪音交易、套利、情绪交易、技术分析、逆向投资、算法交易
-- **完整订单簿系统**: 买卖盘深度、价格撮合、成交记录
-- **做市商机制**: 提供流动性、赚取买卖价差
+- **可扩展架构**: 支持1000+智能体同时在线
+- **API服务**: RESTful API供外部智能体接入
+- **10种交易策略**: 价值投资、动量交易、均值回归、做市商等
+- **完整订单簿**: 买卖盘深度、价格撮合、成交记录
 - **动态价格模型**: 长期有规律、短期多波动
 - **技术指标系统**: RSI、MACD、布林带等
-- **交易时段模拟**: 集合竞价、连续交易、收盘竞价
 
 ## 📦 安装
 
@@ -29,181 +33,224 @@ cd UNASH-TOWN
 ## 🚀 快速开始
 
 ```bash
-# 基本运行（默认10个交易者，模拟3天）
-python main.py
+# 基本运行
+python main.py --days 3 --agents 10
 
-# 自定义参数
-python main.py --traders 10 --days 5 --capital 10000 --price 100 --seed 42
+# 启动API服务
+python main.py --api --port 8080
 
-# 静默模式并输出结果到文件
-python main.py --days 7 --quiet --output result.json
+# 完整参数
+python main.py --agents 10 --days 5 --capital 10000 --api --port 8080 --api-key your_key
 ```
 
-## 📖 详细说明
+## 🔌 API接口
 
-### 交易者类型
+启动API服务后，可通过以下接口接入：
 
-| 类型 | 英文名 | 策略特点 | 风险偏好 |
-|------|--------|----------|----------|
-| 价值投资者 | value_investor | 寻找低估股票，长期持有 | 低 |
-| 动量交易者 | momentum_trader | 追涨杀跌，顺势而为 | 高 |
-| 均值回归者 | mean_reversion | 低买高卖，逆向操作 | 中 |
-| 做市商 | market_maker | 提供流动性，赚取价差 | 中低 |
-| 噪音交易者 | noise_trader | 随机交易，制造波动 | 中高 |
-| 套利者 | arbitrageur | 捕捉定价错误，低风险 | 低 |
-| 情绪交易者 | sentiment_trader | 跟随市场情绪和事件 | 中 |
-| 技术分析师 | technical_analyst | 基于技术指标决策 | 中高 |
-| 逆向投资者 | contrarian | 与大众相反，逆势而为 | 中 |
-| 算法交易者 | algorithmic | 多因子量化策略 | 中 |
+### 智能体管理
 
-### 交易时段
+```bash
+# 注册新智能体
+POST /api/agents/register
+{
+    "type": "callback",
+    "name": "MyAgent",
+    "initial_capital": 10000,
+    "capabilities": ["trading"]
+}
 
-| 时段 | 时间 | 说明 |
-|------|------|------|
-| 盘前 | < 9:00 | 准备阶段 |
-| 开盘集合竞价 | 9:00-9:30 | 集中撮合，确定开盘价 |
-| 连续交易 | 9:30-15:00 | 持续撮合交易 |
-| 收盘集合竞价 | 15:00 | 集中撮合，确定收盘价 |
-| 盘后 | 15:00-18:00 | 清理未成交订单 |
+# 注销智能体
+POST /api/agents/unregister
+{
+    "agent_id": "agent_1_xxx"
+}
 
-### 交易规则
+# 列出所有智能体
+GET /api/agents
+
+# 获取智能体详情
+GET /api/agents/{agent_id}
+```
+
+### 市场数据
+
+```bash
+# 市场状态
+GET /api/market
+
+# 排行榜
+GET /api/leaderboard
+
+# 健康检查
+GET /api/health
+```
+
+### 交易决策
+
+```bash
+# 提交决策
+POST /api/decide
+{
+    "agent_id": "agent_1_xxx",
+    "context": {
+        "market_data": {...},
+        "technical": {...},
+        "agent_state": {...}
+    }
+}
+```
+
+## 🤖 智能体类型
+
+| 类型 | 说明 | 使用场景 |
+|------|------|----------|
+| **LocalAgent** | 本地策略智能体 | 内置策略、快速测试 |
+| **RemoteAgent** | 远程API智能体 | 外部AI模型接入 |
+| **CallbackAgent** | 回调智能体 | 自定义逻辑、事件驱动 |
+
+## 📖 开发指南
+
+### 创建自定义智能体
 
 ```python
-MIN_ORDER_QUANTITY = 1        # 最小下单数量
-MAX_ORDER_QUANTITY = 1000     # 最大下单数量
-PRICE_BAND_PERCENTAGE = 0.10  # 涨跌停限制 10%
-TRADING_FEE_RATE = 0.001      # 交易手续费 0.1%
-MIN_CAPITAL = 100.0           # 最低资金要求
+from src.agent_interface import BaseAgent, TradingContext, TradingDecision
+
+class MyAgent(BaseAgent):
+    def __init__(self, agent_id: str, name: str):
+        super().__init__(agent_id, name, initial_capital=10000)
+    
+    def decide(self, context: TradingContext) -> TradingDecision:
+        # 你的交易逻辑
+        if context.market_data.price < 90:
+            return TradingDecision.buy(
+                price=context.market_data.price,
+                quantity=10,
+                reasoning="Price is low"
+            )
+        return TradingDecision.no_action()
+    
+    def get_info(self):
+        from src.agent_interface import AgentInfo, AgentType, AgentStatus
+        return AgentInfo(
+            agent_id=self.agent_id,
+            name=self.name,
+            agent_type=AgentType.LOCAL,
+            status=self.status
+        )
 ```
 
-### 价格波动模型
+### 注册智能体
 
-**长期规律**:
-- 周期性趋势（约252个交易日一个周期）
-- 均值回归特性
-- 公允价值锚定
+```python
+from src.agent_manager import AgentManager
 
-**短期波动**:
-- 随机噪音
-- 波动率聚集效应
-- 事件冲击
+manager = AgentManager(max_agents=1000)
 
-**市场事件**:
-- 财报超预期/不及预期
-- 并购公告
-- 监管新闻
-- 宏观经济数据
-- 内幕交易
-- 轧空行情
+# 方式1: 直接注册
+agent = MyAgent("my_agent_1", "MyAgent")
+agent_id = manager.register_agent(agent)
 
-### 技术指标
+# 方式2: 创建本地智能体
+agent_id = manager.create_local_agent(
+    name="MyAgent",
+    strategy=my_strategy_function,
+    initial_capital=10000
+)
 
-| 指标 | 说明 | 用途 |
-|------|------|------|
-| RSI | 相对强弱指数 | 超买超卖判断 |
-| MACD | 指数平滑异同移动平均线 | 趋势确认 |
-| 布林带 | 价格通道 | 波动率参考 |
-| 动量 | 价格变化率 | 趋势强度 |
-| 趋势强度 | 短期/长期均线差 | 趋势方向 |
-
-## 📊 输出示例
-
+# 方式3: 创建远程智能体
+agent_id = manager.create_remote_agent(
+    name="RemoteAgent",
+    endpoint="http://your-ai-service:8000",
+    initial_capital=10000
+)
 ```
-============================================================
-  UNASH-TOWN: 股市交易小镇模拟系统
-============================================================
 
-配置:
-  交易者数量: 10
-  模拟天数: 1
-  初始资金: 10,000.00
-  初始股价: 100.00
+### 使用API接入
 
-初始交易者状态:
-------------------------------------------------------------
-  Warren_0: value_investor
-    资金: 10,000.00 | 风险偏好: 0.3
-  George_1: momentum_trader
-    资金: 10,000.00 | 风险偏好: 0.7
-  ...
+```python
+import requests
 
-[09:31] 成交 6 笔, 价格: 96.88, 成交量: 99
-[10:00] 成交 2 笔, 价格: 87.04, 成交量: 91
-...
+# 注册智能体
+response = requests.post("http://localhost:8080/api/agents/register", json={
+    "type": "callback",
+    "name": "ExternalAgent",
+    "initial_capital": 10000
+})
+agent_id = response.json()["agent_id"]
 
-============================================================
-第 1 天交易结束
-============================================================
-开盘: 57.42 | 收盘: 78.71 | 涨跌: -21.29%
-最高: 120.08 | 最低: 53.47 | 成交量: 295
-市场状态: volatile | RSI: 62.5
+# 获取市场数据
+market = requests.get("http://localhost:8080/api/market").json()
 
-交易者排行榜:
-------------------------------------------------------------
-  🥇 1. Jim_3 (market_maker): 总资产 49,589.03 | 收益率 395.89%
-  🥈 2. Jesse_2 (mean_reversion): 总资产 10,226.17 | 收益率 2.26%
-  🥉 3. John_6 (sentiment_trader): 总资产 10,000.00 | 收益率 0.00%
-  ...
+# 提交交易决策
+decision = requests.post("http://localhost:8080/api/decide", json={
+    "agent_id": agent_id,
+    "context": {...}
+}).json()
 ```
 
 ## 🏗️ 项目结构
 
 ```
 UNASH-TOWN/
-├── main.py              # 主程序入口
-├── requirements.txt     # 依赖文件
-├── README.md           # 项目说明
+├── main.py                 # 主程序入口
+├── README.md               # 项目说明
 └── src/
-    ├── __init__.py     # 包初始化
-    ├── trader.py       # 交易者智能体模块
-    ├── trading.py      # 交易系统模块（订单簿、撮合）
-    ├── market.py       # 市场模块（价格生成、技术指标）
-    └── exchange.py     # 交易所模块（交易时段、模拟循环）
+    ├── __init__.py         # 包初始化
+    ├── agent_interface.py  # 智能体抽象接口
+    ├── agent_manager.py    # 智能体管理器
+    ├── api_server.py       # API服务层
+    ├── trader.py           # 交易者智能体
+    ├── trading.py          # 交易系统（订单簿、撮合）
+    ├── market.py           # 市场模块（价格生成、技术指标）
+    └── scalable_exchange.py # 可扩展交易所
 ```
 
 ## 🔧 命令行参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--traders` | 交易者数量 | 10 |
+| `--agents` | 初始智能体数量 | 10 |
 | `--days` | 模拟天数 | 3 |
 | `--capital` | 初始资金 | 10000.0 |
 | `--price` | 初始股价 | 100.0 |
 | `--seed` | 随机种子 | None |
+| `--api` | 启动API服务 | False |
+| `--port` | API端口 | 8080 |
+| `--api-key` | API密钥 | None |
 | `--quiet` | 静默模式 | False |
-| `--output` | 输出文件路径 | None |
+| `--output` | 输出文件 | None |
 
-## 🎯 博弈设计亮点
+## 🎯 架构设计
 
-### 做市商机制
-做市商通过提供买卖双边报价赚取价差，但需要管理库存风险。当库存过高时会调整报价吸引对手盘。
-
-### 价格发现
-通过订单簿的撮合机制，买卖双方的博弈形成市场价格。不同策略的交易者对价格有不同的预期。
-
-### 风险管理
-- 涨跌停限制防止极端波动
-- 保证金要求控制杠杆
-- 手续费抑制过度交易
-
-### 策略博弈
-- 动量交易者 vs 逆向投资者
-- 套利者 vs 噪音交易者
-- 做市商 vs 所有交易者
-
-## 📝 扩展开发
-
-### 添加新的交易策略
-
-在 `src/trader.py` 中的 `TraderType` 枚举和 `TRADER_PROFILES` 字典中添加新类型，然后实现对应的决策方法。
-
-### 自定义交易规则
-
-修改 `src/trading.py` 中的 `TradingRules` 类来调整交易限制。
-
-### 添加新的技术指标
-
-在 `src/market.py` 中的 `TechnicalIndicators` 类中添加新指标。
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      API Server                             │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐       │
+│  │ /agents │  │ /market │  │ /decide │  │ /stats  │       │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘       │
+└───────┼────────────┼────────────┼────────────┼─────────────┘
+        │            │            │            │
+        v            v            v            v
+┌─────────────────────────────────────────────────────────────┐
+│                    Agent Manager                            │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Agent Registry (支持1000+智能体)                     │  │
+│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐        │  │
+│  │  │Local   │ │Remote  │ │Callback│ │Custom  │        │  │
+│  │  │Agent   │ │Agent   │ │Agent   │ │Agent   │        │  │
+│  │  └────────┘ └────────┘ └────────┘ └────────┘        │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+        │
+        v
+┌─────────────────────────────────────────────────────────────┐
+│                   Scalable Exchange                         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
+│  │ Order Book  │  │   Market    │  │  Matching   │        │
+│  │             │  │   Engine    │  │   Engine    │        │
+│  └─────────────┘  └─────────────┘  └─────────────┘        │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## 📄 许可证
 
