@@ -1,362 +1,221 @@
-"""
-永不纳什小镇 - 智能体系统
-整合策略探索、学习反馈、风格演化
-"""
+"""Heterogeneous trader agents."""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 import random
-import time
 
-from .agent_interface import (
-    BaseAgent, AgentInfo, AgentStatus, AgentType,
-    TradingContext, TradingDecision
-)
-from .strategy_explorer import (
-    StrategyExplorer, StrategyType, ActionType, MarketView
-)
-from .energy_system import EnergySystem
-from .life_system import EmotionalState, SocialProfile, ActivityType, MoodType
-from .personality import Personality, AgentArchetype, ARCHETYPE_PROFILES
+from .personality import AgentArchetype, Personality
+from .trading import OrderType, TradingRules
 
 
-class TownAgent(BaseAgent):
-    def __init__(
-        self,
-        agent_id: str,
-        name: str,
-        initial_capital: float = 10000.0,
-        archetype: AgentArchetype = None,
-        bedtime: int = 22,
-        wake_time: int = 6
-    ):
-        super().__init__(agent_id, name, initial_capital)
-        
-        self.archetype = archetype or random.choice(list(AgentArchetype))
-        self.personality = Personality(archetype=self.archetype)
-        
-        initial_tendency = self._get_initial_tendency()
-        exploration_rate = 0.3 - self.personality.memory * 0.2
-        learning_rate = 0.1 + self.personality.learning * 0.1
-        
-        self.strategy_explorer = StrategyExplorer(
-            initial_tendency=initial_tendency,
-            exploration_rate=exploration_rate,
-            learning_rate=learning_rate
-        )
-        
-        self.energy = EnergySystem()
-        self.emotional = EmotionalState()
-        self.social = SocialProfile()
-        
-        self.bedtime = bedtime
-        self.wake_time = wake_time
-        self._is_sleeping = False
-        self._current_activity = ActivityType.RESTING
-        self._current_location = "家"
-        
-        self.trade_log: List[Dict] = []
-        self.daily_pnl: List[float] = []
-        self.hours_slept_last_night: float = 8.0
-        
-        self._last_trade_price: Optional[float] = None
-        self._pending_evaluation: Optional[Dict] = None
-    
-    def _get_initial_tendency(self) -> Dict[str, float]:
-        tendency = {}
-        
-        if self.archetype == AgentArchetype.CONSERVATIVE:
-            tendency["value"] = 0.7
-            tendency["mean_reversion"] = 0.6
-        elif self.archetype == AgentArchetype.GAMBLER:
-            tendency["momentum"] = 0.8
-            tendency["breakout"] = 0.7
-        elif self.archetype == AgentArchetype.TRADER:
-            tendency["swing"] = 0.6
-            tendency["scalping"] = 0.5
-        elif self.archetype == AgentArchetype.LEARNER:
-            pass
-        elif self.archetype == AgentArchetype.REVENGEFUL:
-            tendency["contrarian"] = 0.6
-        elif self.archetype == AgentArchetype.OPPORTUNIST:
-            tendency["trend_following"] = 0.7
-            tendency["momentum"] = 0.6
-        
-        return tendency
-    
-    def should_sleep(self, current_hour: int) -> bool:
-        if self.bedtime > self.wake_time:
-            return current_hour >= self.bedtime or current_hour < self.wake_time
-        else:
-            return self.bedtime <= current_hour < self.wake_time
-    
-    def start_sleeping(self):
-        self._is_sleeping = True
-        self._current_activity = ActivityType.SLEEPING
-        self._current_location = "家"
-    
-    def wake_up(self):
-        self._is_sleeping = False
-        self._current_activity = ActivityType.RESTING
-        
-        sleep_hours = self._calculate_sleep_hours()
-        self.hours_slept_last_night = sleep_hours
-        
-        result = self.energy.sleep(sleep_hours)
-        
-        if sleep_hours >= 8:
-            self.emotional.mood = MoodType.REFRESHED
-        elif sleep_hours >= 6:
-            self.emotional.mood = MoodType.NEUTRAL
-        else:
-            self.emotional.mood = MoodType.TIRED
-            self.emotional.stress = min(100, self.emotional.stress + 10)
-    
-    def _calculate_sleep_hours(self) -> float:
-        if self.bedtime > self.wake_time:
-            return 24 - self.bedtime + self.wake_time
-        else:
-            return self.wake_time - self.bedtime
-    
-    def is_sleeping(self) -> bool:
-        return self._is_sleeping
-    
-    def can_trade(self) -> bool:
-        return (
-            not self._is_sleeping and 
-            self.energy.can_trade() and
-            self.emotional.stress < 80
-        )
-    
-    def update_hour(self, current_hour: int):
-        if self.should_sleep(current_hour) and not self._is_sleeping:
-            self.start_sleeping()
-        elif not self.should_sleep(current_hour) and self._is_sleeping:
-            self.wake_up()
-            self.energy.new_day_reset()
-    
-    def decide(self, context: TradingContext) -> TradingDecision:
-        if self._is_sleeping:
-            return TradingDecision.no_action()
-        
-        if not self.can_trade():
-            return TradingDecision.no_action()
-        
-        if self._pending_evaluation:
-            self._evaluate_pending_trade(context)
-        
-        market_data = self._build_market_data(context)
-        market_view = self.strategy_explorer.analyze_market(market_data)
-        
-        strategy = self.strategy_explorer.select_strategy(market_view)
-        
-        agent_state = {
-            "capital": self.capital,
-            "position": self.position,
-            "avg_cost": self.avg_cost,
-        }
-        
-        action, price, quantity = self.strategy_explorer.decide_action(
-            strategy, market_view, market_data, agent_state
-        )
-        
-        if action == ActionType.BUY and price and quantity:
-            self._pending_evaluation = {
-                "strategy": strategy,
-                "action": action,
-                "entry_price": price,
-                "quantity": quantity,
-                "timestamp": context.timestamp,
-            }
-            return TradingDecision.buy(
-                price=price,
-                quantity=quantity,
-                reasoning=f"[{strategy.value}] 买入"
-            )
-        
-        elif action == ActionType.SELL and price and quantity:
-            profit = 0.0
-            if self.avg_cost > 0:
-                profit = (price - self.avg_cost) * quantity
-            
-            self.strategy_explorer.record_trade_result(
-                strategy=strategy,
-                action=action,
-                profit=profit,
-                success=profit > 0
-            )
-            
-            self._record_trade({
-                "strategy": strategy.value,
-                "action": "sell",
-                "price": price,
-                "quantity": quantity,
-                "profit": profit,
-            })
-            
-            return TradingDecision.sell(
-                price=price,
-                quantity=quantity,
-                reasoning=f"[{strategy.value}] 卖出, 盈亏: {profit:.2f}"
-            )
-        
-        elif action == ActionType.ADD and price and quantity:
-            return TradingDecision.buy(
-                price=price,
-                quantity=quantity,
-                reasoning=f"[{strategy.value}] 加仓"
-            )
-        
-        elif action == ActionType.REDUCE and price and quantity:
-            return TradingDecision.sell(
-                price=price,
-                quantity=quantity,
-                reasoning=f"[{strategy.value}] 减仓"
-            )
-        
-        return TradingDecision.no_action()
-    
-    def _build_market_data(self, context: TradingContext) -> Dict:
-        market = context.market_data
-        technical = context.technical
-        
-        return {
-            "price": market.price,
-            "volume": market.volume,
-            "rsi": technical.rsi,
-            "macd": technical.macd,
-            "signal_line": technical.signal_line,
-            "ma_short": market.price * (1 - technical.momentum * 0.01),
-            "ma_long": market.price * (1 + technical.trend_strength * 0.01),
-            "volatility": abs(technical.momentum) if technical.momentum else 0.02,
-            "support": market.low,
-            "resistance": market.high,
-            "price_history": [market.price],
-        }
-    
-    def _evaluate_pending_trade(self, context: TradingContext):
-        if not self._pending_evaluation:
-            return
-        
-        current_price = context.market_data.price
-        entry_price = self._pending_evaluation["entry_price"]
-        strategy = self._pending_evaluation["strategy"]
-        
+@dataclass
+class TradingDecision:
+    action: str = "hold"
+    price: Optional[float] = None
+    quantity: int = 0
+    reason: str = ""
+
+    @classmethod
+    def hold(cls, reason: str = "") -> "TradingDecision":
+        return cls(action="hold", reason=reason)
+
+
+@dataclass
+class TownAgent:
+    agent_id: str
+    name: str
+    initial_capital: float
+    archetype: AgentArchetype
+    seed: Optional[int] = None
+    capital: float = field(init=False)
+    position: int = 0
+    today_bought: int = 0
+    avg_cost: float = 0.0
+    realized_pnl: float = 0.0
+    total_fees: float = 0.0
+    initial_equity: float = field(init=False)
+    trade_count: int = 0
+    wins: int = 0
+    losses: int = 0
+    personality: Personality = field(init=False)
+    memory: List[Dict] = field(default_factory=list)
+    strategy_weights: Dict[str, float] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.random = random.Random(self.seed)
+        self.personality = Personality(self.archetype)
+        self.capital = self.initial_capital * self.personality.cash_scale
+        self.initial_equity = self.capital
+        self.strategy_weights = self._initial_strategy_weights()
+
+    @property
+    def available_position(self) -> int:
+        return max(0, self.position - self.today_bought)
+
+    def total_value(self, price: float) -> float:
+        return self.capital + self.position * price
+
+    def return_rate(self, price: float) -> float:
+        base = self.initial_equity
+        return (self.total_value(price) - base) / base if base else 0.0
+
+    def decide(self, context: Dict) -> TradingDecision:
+        price = float(context["price"])
+        rsi = float(context["rsi"])
+        momentum = float(context["momentum"])
+        volatility = float(context["volatility"])
+        imbalance = float(context["imbalance"])
+        regime = str(context["regime"])
+
+        signal = self._score_market(rsi, momentum, volatility, imbalance, regime)
+        risk_budget = self.capital * self.personality.position_size * (0.45 + self.personality.risk)
+        quantity = TradingRules.round_lot(int(risk_budget / max(price, 0.01)))
+
         if self.position > 0:
-            unrealized_pnl = (current_price - self.avg_cost) * self.position
-            if abs(unrealized_pnl) > self.capital * 0.05:
-                self.strategy_explorer.record_trade_result(
-                    strategy=strategy,
-                    action=ActionType.BUY,
-                    profit=unrealized_pnl,
-                    success=unrealized_pnl > 0
-                )
-                self._pending_evaluation = None
-    
-    def _record_trade(self, trade_info: Dict):
-        self.trade_log.append({
-            **trade_info,
-            "capital": self.capital,
-            "position": self.position,
-            "timestamp": time.time(),
-        })
-        
-        profit = trade_info.get("profit", 0)
-        self.daily_pnl.append(profit)
-        if len(self.daily_pnl) > 100:
-            self.daily_pnl.pop(0)
-        
-        if profit > 0:
-            self.emotional.trading_effect(True, profit / 100)
+            pnl_pct = (price - self.avg_cost) / self.avg_cost if self.avg_cost else 0.0
+            stop_loss = 0.03 + (1 - self.personality.risk) * 0.05
+            take_profit = 0.04 + self.personality.risk * 0.10
+            if pnl_pct <= -stop_loss:
+                return TradingDecision("sell", TradingRules.round_price(price * 0.998), self.available_position, "risk stop")
+            if pnl_pct >= take_profit and self.random.random() > self.personality.patience:
+                return TradingDecision("sell", TradingRules.round_price(price * 1.001), self.available_position, "take profit")
+
+        threshold = 0.30 + (1 - self.personality.risk) * 0.18
+        if signal > threshold and quantity >= TradingRules.MIN_LOT:
+            limit = price * (1 + 0.002 * self.personality.risk)
+            return TradingDecision("buy", TradingRules.round_price(limit), quantity, "positive composite signal")
+
+        if signal < -threshold and self.available_position >= TradingRules.MIN_LOT:
+            sell_qty = TradingRules.round_lot(max(TradingRules.MIN_LOT, int(self.available_position * (0.4 + self.personality.risk * 0.4))))
+            return TradingDecision("sell", TradingRules.round_price(price * 0.998), min(sell_qty, self.available_position), "negative composite signal")
+
+        if self.archetype is AgentArchetype.NOISE and self.random.random() < 0.06:
+            if self.position > 0 and self.random.random() < 0.5:
+                return TradingDecision("sell", TradingRules.round_price(price), self.available_position, "noise liquidity")
+            if quantity >= TradingRules.MIN_LOT:
+                return TradingDecision("buy", TradingRules.round_price(price), quantity, "noise liquidity")
+
+        return TradingDecision.hold("no edge")
+
+    def _initial_strategy_weights(self) -> Dict[str, float]:
+        weights = {"value": 0.0, "momentum": 0.0, "mean_reversion": 0.0, "liquidity": 0.0}
+        if self.archetype in {AgentArchetype.VALUE, AgentArchetype.CONTRARIAN, AgentArchetype.HEDGING}:
+            weights["value"] += 0.45
+            weights["mean_reversion"] += 0.35
+        if self.archetype in {AgentArchetype.MOMENTUM, AgentArchetype.GROWTH, AgentArchetype.VOLATILITY}:
+            weights["momentum"] += 0.55
+            weights["liquidity"] += 0.15
+        if self.archetype in {AgentArchetype.ARBITRAGE, AgentArchetype.QUANTITATIVE}:
+            weights["mean_reversion"] += 0.45
+            weights["liquidity"] += 0.25
+        if self.archetype is AgentArchetype.NOISE:
+            weights["liquidity"] += 0.65
+        if self.archetype is AgentArchetype.LEARNING:
+            weights = {key: 0.25 for key in weights}
+        total = sum(weights.values()) or 1.0
+        return {key: value / total for key, value in weights.items()}
+
+    def _score_market(self, rsi: float, momentum: float, volatility: float, imbalance: float, regime: str) -> float:
+        value_score = (50 - rsi) / 50
+        momentum_score = max(-1.0, min(1.0, momentum * 80))
+        mean_reversion_score = 0.0
+        if rsi < 35:
+            mean_reversion_score = 0.65
+        elif rsi > 68:
+            mean_reversion_score = -0.65
+        liquidity_score = imbalance * 0.4 - volatility * 4
+        regime_bias = {"bull": 0.18, "bear": -0.18, "volatile": -0.05, "sideways": 0.0}.get(regime, 0.0)
+
+        score = (
+            self.strategy_weights["value"] * value_score
+            + self.strategy_weights["momentum"] * momentum_score
+            + self.strategy_weights["mean_reversion"] * mean_reversion_score
+            + self.strategy_weights["liquidity"] * liquidity_score
+            + regime_bias
+        )
+        return max(-1.0, min(1.0, score))
+
+    def apply_buy(self, quantity: int, price: float, fee: float) -> None:
+        value = quantity * price
+        previous_cost = self.avg_cost * self.position
+        self.capital -= value + fee
+        self.position += quantity
+        self.today_bought += quantity
+        self.avg_cost = (previous_cost + value) / self.position if self.position else 0.0
+        self.total_fees += fee
+        self.trade_count += 1
+
+    def apply_sell(self, quantity: int, price: float, fee: float, stamp_duty: float) -> None:
+        quantity = min(quantity, self.position)
+        pnl = (price - self.avg_cost) * quantity - fee - stamp_duty
+        self.capital += quantity * price - fee - stamp_duty
+        self.position -= quantity
+        self.realized_pnl += pnl
+        self.total_fees += fee + stamp_duty
+        self.trade_count += 1
+        if pnl >= 0:
+            self.wins += 1
         else:
-            self.emotional.trading_effect(False, abs(profit) / 100)
-    
-    def on_trade_executed(self, trade_info: Dict):
-        super().on_trade_executed(trade_info)
-    
-    def get_status(self) -> Dict:
-        energy_status = self.energy.get_status()
-        strategy_status = self.strategy_explorer.get_status()
-        
+            self.losses += 1
+        if self.position == 0:
+            self.avg_cost = 0.0
+        self.personality.adapt(pnl)
+        self.memory.append({"type": "sell", "pnl": round(pnl, 2), "price": price, "quantity": quantity})
+        if len(self.memory) > 50:
+            self.memory.pop(0)
+
+    def end_day(self) -> None:
+        self.today_bought = 0
+
+    def get_status(self, price: float = 0.0) -> Dict:
+        value = self.total_value(price)
+        return_rate = self.return_rate(price)
         return {
             "agent_id": self.agent_id,
             "name": self.name,
             "archetype": self.archetype.value,
-            "dominant_style": strategy_status["dominant_style"],
-            "current_strategy": strategy_status["current_strategy"],
-            "is_sleeping": self._is_sleeping,
-            "activity": self._current_activity.value,
-            "energy": energy_status["current_energy"],
-            "trading_skill": energy_status["trading_skill"],
-            "mood": self.emotional.mood.value,
-            "stress": round(self.emotional.stress, 1),
+            "label": self.personality.label,
             "capital": round(self.capital, 2),
             "position": self.position,
-            "total_value": round(self.total_value, 2),
-            "return_rate": f"{(self.total_value / 10000 - 1) * 100:.1f}%",
-            "total_trades": len(self.trade_log),
-            "win_rate": self._calculate_win_rate(),
-            "style_params": strategy_status["style"],
+            "available_position": self.available_position,
+            "avg_cost": round(self.avg_cost, 2),
+            "total_value": round(value, 2),
+            "return_rate": round(return_rate * 100, 2),
+            "realized_pnl": round(self.realized_pnl, 2),
+            "total_fees": round(self.total_fees, 2),
+            "trade_count": self.trade_count,
+            "win_rate": round(self.wins / max(1, self.wins + self.losses) * 100, 2),
+            "risk": round(self.personality.risk, 2),
+            "position_size": round(self.personality.position_size, 2),
+            "dominant_style": max(self.strategy_weights, key=self.strategy_weights.get),
         }
-    
-    def _calculate_win_rate(self) -> str:
-        if not self.trade_log:
-            return "N/A"
-        profits = [t.get("profit", 0) for t in self.trade_log if "profit" in t]
-        if not profits:
-            return "N/A"
-        wins = sum(1 for p in profits if p > 0)
-        return f"{wins / len(profits) * 100:.1f}%"
-    
-    def get_info(self) -> AgentInfo:
-        return AgentInfo(
-            agent_id=self.agent_id,
-            name=self.name,
-            agent_type=AgentType.LOCAL,
-            status=AgentStatus.INACTIVE if self._is_sleeping else AgentStatus.ACTIVE,
-            capabilities=["trading", "strategy_exploration"],
-            metadata={
-                "archetype": self.archetype.value,
-                "dominant_style": self.strategy_explorer.get_dominant_style(),
-                "personality": {
-                    "risk": self.personality.risk,
-                    "trust": self.personality.trust,
-                    "memory": self.personality.memory,
-                    "greed": self.personality.greed,
-                    "learning": self.personality.learning,
-                }
-            }
-        )
 
 
-def create_town_agents(num_agents: int = 10, initial_capital: float = 10000.0) -> List[TownAgent]:
+def create_town_agents(
+    num_agents: int,
+    initial_capital: float,
+    seed: Optional[int] = None,
+    initial_price: float = 100.0,
+) -> List[TownAgent]:
+    rng = random.Random(seed)
     archetypes = list(AgentArchetype)
-    
-    names = [
-        "小明", "小红", "小华", "小丽", "小强",
-        "小芳", "小伟", "小娟", "小军", "小燕",
-        "小刚", "小梅", "小勇", "小英", "小杰"
-    ]
-    
-    agents = []
-    for i in range(num_agents):
-        archetype = archetypes[i % len(archetypes)]
-        name = names[i % len(names)]
-        bedtime = random.randint(21, 23)
-        wake_time = random.randint(5, 7)
-        
+    names = ["Aster", "Beryl", "Cedar", "Dune", "Echo", "Flux", "Gale", "Halo", "Iris", "Jade"]
+    agents: List[TownAgent] = []
+    for index in range(num_agents):
+        archetype = archetypes[index % len(archetypes)]
         agent = TownAgent(
-            agent_id=f"town_agent_{i}",
-            name=f"{name}_{i}",
+            agent_id=f"agent_{index:03d}",
+            name=f"{names[index % len(names)]}-{index + 1}",
             initial_capital=initial_capital,
             archetype=archetype,
-            bedtime=bedtime,
-            wake_time=wake_time
+            seed=rng.randint(0, 10_000_000),
         )
-        
-        if i % 3 == 0:
-            agent.position = random.randint(50, 100)
-            agent.capital = initial_capital * 0.5
-        
+        if index % 3 == 0:
+            quantity = TradingRules.round_lot(int((agent.capital * 0.28) / initial_price))
+            agent.position = quantity
+            agent.avg_cost = initial_price
+            agent.capital -= quantity * initial_price
+            agent.initial_equity = agent.capital + quantity * initial_price
         agents.append(agent)
-    
     return agents

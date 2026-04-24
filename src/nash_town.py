@@ -1,439 +1,236 @@
-"""
-永不纳什小镇 - 简化版模拟系统
-核心：A股交易规则，智能体自主决策
-"""
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
+"""UNASH-TOWN simulation engine."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 import random
 
+from .market import AShareMarket
 from .town_agent import TownAgent, create_town_agents
-from .trading import OrderBook, Order, OrderType, Trade, TradingRules
-from .market import AShareMarket, MarketPhase
+from .trading import Order, OrderBook, OrderType, TradingRules
 
 
 @dataclass
 class TownStats:
+    total_orders: int = 0
     total_trades: int = 0
     total_volume: int = 0
+    total_turnover: float = 0.0
 
 
 class NashTown:
-    HOURS_PER_DAY = 24
-    
-    PRICE_LIMIT = 0.10
-    
-    CALL_AUCTION_OPEN = (9, 15)
-    CALL_AUCTION_CLOSE = (9, 25)
-    MORNING_TRADING_START = (9, 30)
-    MORNING_TRADING_END = (11, 30)
-    LUNCH_BREAK_START = (11, 30)
-    LUNCH_BREAK_END = (13, 0)
-    AFTERNOON_TRADING_START = (13, 0)
-    AFTERNOON_TRADING_END = (15, 0)
-    CALL_AUCTION_CLOSE_START = (14, 57)
-    MARKET_CLOSE = (15, 0)
-    
+    SESSION_MINUTES = list(range(9 * 60 + 30, 11 * 60 + 31)) + list(range(13 * 60, 15 * 60 + 1))
+
     def __init__(
         self,
         num_agents: int = 10,
-        initial_capital: float = 10000.0,
+        initial_capital: float = 100000.0,
         initial_price: float = 100.0,
         seed: Optional[int] = None,
-        verbose: bool = True
-    ):
-        if seed is not None:
-            random.seed(seed)
-        
-        self.agents = create_town_agents(num_agents, initial_capital)
-        self.market = AShareMarket(initial_price, seed)
-        self.order_book = OrderBook()
-        
-        self.current_hour = 9
-        self.current_minute = 30
-        self.current_day = 1
-        
+        verbose: bool = True,
+    ) -> None:
+        self.random = random.Random(seed)
         self.verbose = verbose
+        self.market = AShareMarket(initial_price=initial_price, seed=seed)
+        self.order_book = OrderBook()
+        self.agents: List[TownAgent] = create_town_agents(num_agents, initial_capital, seed, initial_price)
+        self.current_day = 1
+        self.current_minute_index = 0
         self.stats = TownStats()
-        
         self.daily_logs: List[Dict] = []
         self.trade_log: List[Dict] = []
-        
-        self._tick_count = 0
-        self._max_ticks_per_day = 6 * 60 + 30
-        
-        self._limit_up = initial_price * (1 + self.PRICE_LIMIT)
-        self._limit_down = initial_price * (1 - self.PRICE_LIMIT)
-    
-    def _time_to_minutes(self, hour: int, minute: int) -> int:
-        return hour * 60 + minute
-    
+        self.last_tick: Dict = {}
+
+    @property
+    def current_time_minutes(self) -> int:
+        return self.SESSION_MINUTES[self.current_minute_index]
+
+    @property
+    def current_hour(self) -> int:
+        return self.current_time_minutes // 60
+
+    @property
+    def current_minute(self) -> int:
+        return self.current_time_minutes % 60
+
     def get_market_phase(self) -> str:
-        current = self._time_to_minutes(self.current_hour, self.current_minute)
-        
-        call_open = self._time_to_minutes(*self.CALL_AUCTION_OPEN)
-        call_close = self._time_to_minutes(*self.CALL_AUCTION_CLOSE)
-        morning_start = self._time_to_minutes(*self.MORNING_TRADING_START)
-        morning_end = self._time_to_minutes(*self.MORNING_TRADING_END)
-        lunch_start = self._time_to_minutes(*self.LUNCH_BREAK_START)
-        lunch_end = self._time_to_minutes(*self.LUNCH_BREAK_END)
-        afternoon_start = self._time_to_minutes(*self.AFTERNOON_TRADING_START)
-        afternoon_end = self._time_to_minutes(*self.AFTERNOON_TRADING_END)
-        close_start = self._time_to_minutes(*self.CALL_AUCTION_CLOSE_START)
-        market_close = self._time_to_minutes(*self.MARKET_CLOSE)
-        
-        if current < call_open:
-            return "pre_market"
-        elif call_open <= current < call_close:
-            return "call_auction_open"
-        elif call_close <= current < morning_start:
-            return "call_auction_match"
-        elif morning_start <= current < morning_end:
+        minute = self.current_time_minutes
+        if minute < 9 * 60 + 30:
+            return "opening_call"
+        if 9 * 60 + 30 <= minute <= 11 * 60 + 30:
             return "morning_continuous"
-        elif lunch_start <= current < lunch_end:
+        if 11 * 60 + 30 < minute < 13 * 60:
             return "lunch_break"
-        elif afternoon_start <= current < close_start:
+        if 13 * 60 <= minute < 14 * 60 + 57:
             return "afternoon_continuous"
-        elif close_start <= current < afternoon_end:
-            return "call_auction_close"
-        elif afternoon_end <= current < market_close:
-            return "closing"
-        else:
-            return "closed"
-    
-    def is_trading_time(self) -> bool:
-        phase = self.get_market_phase()
-        return phase in ["call_auction_open", "call_auction_match", 
-                        "morning_continuous", "afternoon_continuous",
-                        "call_auction_close"]
-    
-    def is_lunch_break(self) -> bool:
-        return self.get_market_phase() == "lunch_break"
-    
+        if 14 * 60 + 57 <= minute <= 15 * 60:
+            return "closing_call"
+        return "closed"
+
     def simulate_tick(self) -> Dict:
-        self._tick_count += 1
-        
-        if self._tick_count > self._max_ticks_per_day:
-            return {"error": "max_ticks_exceeded"}
-        
-        phase = self.get_market_phase()
-        
-        tick_result = {
-            "day": self.current_day,
-            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
-            "phase": phase,
-            "trades": [],
-            "price": self.market.state.current_price,
-        }
-        
+        timestamp = self.current_day * 10000 + self.current_time_minutes
+        context = self._build_context()
+        orders_created = 0
+
         for agent in self.agents:
-            agent.update_hour(self.current_hour)
-        
-        if self.is_trading_time():
-            trades = self._run_trading_tick(phase)
-            tick_result["trades"] = trades
-            tick_result["price"] = self.market.state.current_price
-        
-        self._advance_time()
-        
-        if self.current_hour == 15 and self.current_minute == 0:
-            self._end_day()
-            tick_result["day_ended"] = True
-        
-        return tick_result
-    
-    def _run_trading_tick(self, phase: str) -> List[Dict]:
-        timestamp = self._time_to_minutes(self.current_hour, self.current_minute)
-        trades_executed = []
-        
-        awake_agents = [a for a in self.agents if not a.is_sleeping()]
-        
-        for agent in awake_agents:
-            if not agent.can_trade():
-                continue
-            
-            trade_prob = 0.1 if "call_auction" in phase else 0.05
-            
-            if random.random() < trade_prob:
-                decision = self._get_agent_decision(agent, timestamp)
-                
-                if decision:
-                    order = self._create_order(agent, decision, timestamp)
-                    if order:
-                        valid, msg = TradingRules.validate_order(
-                            order.price,
-                            order.quantity,
-                            self.market.state.current_price,
-                            agent.capital,
-                            agent.position
-                        )
-                        if valid:
-                            self.order_book.add_order(order)
-        
-        if phase == "call_auction_match":
-            trades = self.order_book.match_orders(timestamp)
-        elif phase in ["morning_continuous", "afternoon_continuous"]:
-            trades = self.order_book.match_orders(timestamp)
-        elif phase == "call_auction_close":
-            trades = self.order_book.match_orders(timestamp)
-        else:
-            trades = []
-        
-        for trade in trades:
-            self._execute_trade(trade)
-            trades_executed.append({
-                "buyer": trade.buyer_id,
-                "seller": trade.seller_id,
-                "price": trade.price,
-                "quantity": trade.quantity
-            })
-        
-        if trades:
-            self.market.tick(len(trades))
-        
-        return trades_executed
-    
-    def _get_agent_decision(self, agent: TownAgent, timestamp: int):
-        from .agent_interface import TradingContext, MarketData, TechnicalIndicators
-        
-        market_summary = self.market.get_market_summary()
-        technical = self.market.get_technical_analysis()
-        
-        context = TradingContext(
-            market_data=MarketData(
-                price=market_summary["price"],
-                volume=market_summary["volume"],
-                timestamp=timestamp,
-                bid=self.order_book.get_spread()[0],
-                ask=self.order_book.get_spread()[1],
-                high=market_summary["day_high"],
-                low=market_summary["day_low"],
-                open_price=self.market.state.day_open,
-                phase=market_summary["phase"],
-                event=market_summary["event"],
-            ),
-            technical=TechnicalIndicators(
-                rsi=technical["rsi"],
-                macd=technical["macd"],
-                signal_line=technical["signal_line"],
-            ),
-            agent_state=agent.get_state(),
-            order_book_depth=self.order_book.get_market_depth(),
-            timestamp=timestamp,
-        )
-        
-        return agent.decide(context)
-    
-    def _create_order(self, agent: TownAgent, decision, timestamp: int) -> Optional[Order]:
-        if decision.action == "none":
-            return None
-        
-        current_price = self.market.state.current_price
-        
-        if self._limit_up and current_price >= self._limit_up:
-            if decision.action == "buy":
-                return None
-        
-        if self._limit_down and current_price <= self._limit_down:
-            if decision.action == "sell":
-                return None
-        
-        if decision.action == "buy":
-            if decision.price is None or decision.quantity is None:
-                return None
-            
-            price = decision.price
-            
-            if self._limit_up:
-                price = min(price, self._limit_up)
-            if self._limit_down:
-                price = max(price, self._limit_down)
-            
-            quantity = decision.quantity
-            
-            max_qty = int(agent.capital / (price * (1 + TradingRules.TRADING_FEE_RATE)))
-            quantity = min(quantity, max_qty)
-            
-            if quantity <= 0:
-                return None
-            
-            return Order(
-                order_id=0,
-                agent_id=agent.agent_id,
-                order_type=OrderType.BUY,
-                price=price,
-                quantity=quantity,
-                timestamp=timestamp
-            )
-        
-        elif decision.action == "sell":
-            if agent.position <= 0:
-                return None
-            
-            price = decision.price or self.market.state.current_price
-            
-            if self._limit_up:
-                price = min(price, self._limit_up)
-            if self._limit_down:
-                price = max(price, self._limit_down)
-            
-            quantity = decision.quantity or agent.position
-            quantity = min(quantity, agent.position)
-            
-            if quantity <= 0:
-                return None
-            
-            return Order(
-                order_id=0,
-                agent_id=agent.agent_id,
-                order_type=OrderType.SELL,
-                price=price,
-                quantity=quantity,
-                timestamp=timestamp
-            )
-        
-        return None
-    
-    def _execute_trade(self, trade: Trade):
-        buyer = next((a for a in self.agents if a.agent_id == trade.buyer_id), None)
-        seller = next((a for a in self.agents if a.agent_id == trade.seller_id), None)
-        
-        fee = TradingRules.calculate_fee(trade.price * trade.quantity)
-        
-        if buyer:
-            buyer.update_position(True, trade.quantity, trade.price, fee)
-        
-        if seller:
-            seller.update_position(False, trade.quantity, trade.price, fee)
-        
-        self.stats.total_trades += 1
-        self.stats.total_volume += trade.quantity
-        
-        self.trade_log.append({
+            decision = agent.decide(context)
+            order = self._decision_to_order(agent, decision, timestamp)
+            if order:
+                self.order_book.add_order(order)
+                orders_created += 1
+                self.stats.total_orders += 1
+
+        trades = self.order_book.match(timestamp)
+        buy_volume = sum(trade.quantity for trade in trades)
+        self._apply_trades(trades)
+
+        imbalance = self.order_book.imbalance()
+        net_pressure = imbalance + self._trade_pressure(trades)
+        self.market.tick(net_pressure=net_pressure, traded_volume=buy_volume)
+        for agent in self.agents:
+            pass
+
+        result = {
             "day": self.current_day,
-            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
+            "time": self.time_label(),
+            "phase": self.get_market_phase(),
+            "price": self.market.state.price,
+            "orders": orders_created,
+            "trades": [self._trade_to_dict(trade) for trade in trades],
+            "stats": self._stats_dict(),
+        }
+        self.last_tick = result
+        self._advance_clock()
+        return result
+
+    def simulate_day(self) -> Dict:
+        start_day = self.current_day
+        while self.current_day == start_day:
+            self.simulate_tick()
+        return self.daily_logs[-1]
+
+    def simulate_days(self, num_days: int) -> List[Dict]:
+        return [self.simulate_day() for _ in range(num_days)]
+
+    def _build_context(self) -> Dict:
+        summary = self.market.get_market_summary()
+        technical = self.market.get_technical_analysis()
+        return {
+            "price": summary["price"],
+            "rsi": technical["rsi"],
+            "momentum": technical["momentum"],
+            "volatility": technical["volatility"],
+            "imbalance": self.order_book.imbalance(),
+            "regime": summary["regime"],
+            "event": summary["event"],
+            "phase": self.get_market_phase(),
+        }
+
+    def _decision_to_order(self, agent: TownAgent, decision, timestamp: int) -> Optional[Order]:
+        if decision.action not in {"buy", "sell"} or not decision.price or decision.quantity <= 0:
+            return None
+        order_type = OrderType.BUY if decision.action == "buy" else OrderType.SELL
+        quantity = TradingRules.round_lot(decision.quantity)
+        price = TradingRules.round_price(decision.price)
+        valid, _ = TradingRules.validate_order(
+            order_type=order_type,
+            price=price,
+            quantity=quantity,
+            reference_price=self.market.state.previous_close,
+            capital=agent.capital,
+            available_position=agent.available_position,
+        )
+        if not valid:
+            return None
+        return Order(0, agent.agent_id, order_type, price, quantity, timestamp)
+
+    def _apply_trades(self, trades) -> None:
+        agents = {agent.agent_id: agent for agent in self.agents}
+        for trade in trades:
+            buyer = agents.get(trade.buyer_id)
+            seller = agents.get(trade.seller_id)
+            if not buyer or not seller:
+                continue
+            buyer.apply_buy(trade.quantity, trade.price, trade.buyer_fee)
+            seller.apply_sell(trade.quantity, trade.price, trade.seller_fee, trade.stamp_duty)
+            self.stats.total_trades += 1
+            self.stats.total_volume += trade.quantity
+            self.stats.total_turnover += trade.price * trade.quantity
+            self.trade_log.append(self._trade_to_dict(trade))
+
+    def _trade_pressure(self, trades) -> float:
+        if not trades:
+            return 0.0
+        buy_value = sum(trade.price * trade.quantity for trade in trades)
+        scale = max(1.0, self.market.state.turnover + buy_value)
+        return min(0.35, buy_value / scale * 0.08)
+
+    def _advance_clock(self) -> None:
+        self.current_minute_index += 1
+        if self.current_minute_index >= len(self.SESSION_MINUTES):
+            self._end_day()
+
+    def _end_day(self) -> None:
+        summary = self.market.get_market_summary()
+        snapshot = {
+            "day": self.current_day,
+            "market": summary,
+            "stats": self._stats_dict(),
+            "agents": [agent.get_status(summary["price"]) for agent in self.agents],
+        }
+        self.daily_logs.append(snapshot)
+        if self.verbose:
+            self._print_day_summary(snapshot)
+        for agent in self.agents:
+            agent.end_day()
+        self.order_book.clear()
+        self.market.new_day()
+        self.current_day += 1
+        self.current_minute_index = 0
+        self.stats = TownStats()
+
+    def _print_day_summary(self, snapshot: Dict) -> None:
+        market = snapshot["market"]
+        leaders = sorted(snapshot["agents"], key=lambda item: item["total_value"], reverse=True)[:3]
+        print(f"Day {snapshot['day']} close {market['price']:.2f} ({market['change_pct']:+.2f}%), trades={snapshot['stats']['total_trades']}")
+        for rank, agent in enumerate(leaders, 1):
+            print(f"  {rank}. {agent['name']} {agent['label']} value={agent['total_value']:.0f} return={agent['return_rate']:+.2f}%")
+
+    def _stats_dict(self) -> Dict:
+        return {
+            "total_orders": self.stats.total_orders,
+            "total_trades": self.stats.total_trades,
+            "total_volume": self.stats.total_volume,
+            "total_turnover": round(self.stats.total_turnover, 2),
+        }
+
+    def _trade_to_dict(self, trade) -> Dict:
+        return {
+            "trade_id": trade.trade_id,
             "buyer": trade.buyer_id,
             "seller": trade.seller_id,
             "price": trade.price,
             "quantity": trade.quantity,
-        })
-    
-    def _advance_time(self):
-        self.current_minute += 1
-        if self.current_minute >= 60:
-            self.current_minute = 0
-            self.current_hour += 1
-            
-            if self.current_hour >= 24:
-                self.current_hour = 0
-    
-    def _end_day(self):
-        daily_log = {
-            "day": self.current_day,
-            "open": self.market.state.day_open,
-            "high": self.market.state.day_high,
-            "low": self.market.state.day_low,
-            "close": self.market.state.current_price,
-            "volume": self.stats.total_volume,
-            "trades": self.stats.total_trades,
-            "agents": [
-                {
-                    "name": a.name,
-                    "capital": a.capital,
-                    "position": a.position,
-                    "total_value": a.total_value,
-                }
-                for a in self.agents
-            ]
+            "timestamp": trade.timestamp,
         }
-        self.daily_logs.append(daily_log)
-        
-        if self.verbose:
-            self._print_day_summary()
-        
-        self.current_day += 1
-        self.market.new_day()
-        self.stats = TownStats()
-        self._tick_count = 0
-        
-        self._limit_up = self.market.state.day_open * (1 + self.PRICE_LIMIT)
-        self._limit_down = self.market.state.day_open * (1 - self.PRICE_LIMIT)
-        
-        self.current_hour = 9
-        self.current_minute = 30
-    
-    def _print_day_summary(self):
-        print(f"\n{'='*60}")
-        print(f"📊 第 {self.current_day} 天交易结束")
-        print(f"{'='*60}")
-        
-        summary = self.market.get_market_summary()
-        print(f"开盘: {summary.get('day_open', summary['price']):.2f} | "
-              f"收盘: {summary['price']:.2f} | "
-              f"涨跌: {summary['change_pct']:.2f}%")
-        print(f"最高: {summary['day_high']:.2f} | "
-              f"最低: {summary['day_low']:.2f} | "
-              f"成交量: {self.stats.total_volume}")
-        
-        sorted_agents = sorted(self.agents, key=lambda a: a.total_value, reverse=True)
-        print(f"\n🏆 财富榜 Top 5:")
-        for i, agent in enumerate(sorted_agents[:5], 1):
-            medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "  "))
-            print(f"  {medal} {agent.name}: {agent.total_value:,.0f}元")
-    
-    def simulate_day(self) -> Dict:
-        if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"🏘️ 永不纳什小镇 - 第 {self.current_day} 天")
-            print(f"{'='*60}")
-            print(f"智能体数量: {len(self.agents)}")
-        
-        start_day = self.current_day
-        ticks = 0
-        max_ticks = self._max_ticks_per_day + 100
-        
-        while ticks < max_ticks:
-            result = self.simulate_tick()
-            ticks += 1
-            
-            if result.get("day_ended"):
-                break
-        
-        return self.daily_logs[-1] if self.daily_logs else {}
-    
-    def simulate_days(self, num_days: int) -> List[Dict]:
-        logs = []
-        for _ in range(num_days):
-            day_log = self.simulate_day()
-            logs.append(day_log)
-        return logs
-    
+
+    def time_label(self) -> str:
+        return f"{self.current_hour:02d}:{self.current_minute:02d}"
+
     def get_market_overview(self) -> Dict:
         return {
             "day": self.current_day,
-            "time": f"{self.current_hour:02d}:{self.current_minute:02d}",
+            "time": self.time_label(),
             "phase": self.get_market_phase(),
-            "price": self.market.state.current_price,
             "market": self.market.get_market_summary(),
-            "agents": len(self.agents),
+            "stats": self._stats_dict(),
+            "order_book": self.order_book.depth(),
         }
-    
-    def get_available_actions(self, agent_id: str) -> List[str]:
-        agent = next((a for a in self.agents if a.agent_id == agent_id), None)
-        if not agent:
-            return []
-        
-        actions = []
-        
-        if agent.is_sleeping():
-            return ["sleep"]
-        
-        if self.is_trading_time():
-            if agent.can_trade():
-                actions.extend(["buy", "sell", "hold"])
-        
-        if self.is_lunch_break():
-            actions.extend(["rest", "socialize"])
-        
-        actions.append("wait")
-        
-        return actions
+
+    def get_town_overview(self) -> Dict:
+        price = self.market.state.price
+        return {
+            **self.get_market_overview(),
+            "agents": [agent.get_status(price) for agent in self.agents],
+            "recent_trades": self.trade_log[-20:],
+        }
